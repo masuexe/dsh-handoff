@@ -45,6 +45,7 @@ Do not install this plugin in a headless profile.
 
 Use `--bin-dir PATH` or `--codex-home PATH` to select other installation directories.
 Use `--skip-deps` to refresh an installation that already has its dependencies.
+Use the installer's `--host-socket PATH` to select a separately configured plugin instance for the installed command.
 
 ## Use
 
@@ -74,6 +75,36 @@ Use `--backend headless` to select the original independent-process mode explici
 That mode requires DSH on `PATH` and a configured `headless` profile.
 It reads plain YAML from `$DSH_HOME/profiles/headless/cordis.patch.yml`, with `~/.dsh` as the default home.
 The Web UI can misclassify an active headless session as interrupted because it reads that session as persisted history.
+
+## Session selection
+
+Codex selects the session from the task relationship when it uses the installed skill.
+The command itself does not infer whether two tasks belong together.
+List candidates without a model call:
+
+```bash
+dsh-handoff sessions --cwd /absolute/workspace
+dsh-handoff session-info SESSION_ID --cwd /absolute/workspace
+dsh-handoff submit --plan /absolute/plan.md --cwd /absolute/workspace --continue-session SESSION_ID
+dsh-handoff submit --plan /absolute/plan.md --cwd /absolute/workspace --new-session
+```
+
+The candidate list contains visible ordinary sessions in the same workspace.
+It includes status, model selection, and a prior handoff summary when available.
+The excerpt command returns only the last three user or assistant messages, with bounded text.
+Neither command starts a model request or activates a stored session.
+
+Continue a relevant idle session for a repair or the next part of the same task.
+Create a new session for independent work, incompatible model settings, or excessive historical context.
+Continuation preserves the session ID, title, and history.
+Each assignment still has its own job ID, result report, time limit, and Codex callback.
+The requested provider, model, and effort must match the existing session.
+The plugin refuses busy sessions, pending input, subagent sessions, and other workspaces.
+It can resume a visible stored ordinary session through DSH's native controller.
+It never creates a substitute session after a continuation failure.
+
+If neither session flag is present, the CLI retains its default of a new session.
+The flags are mutually exclusive. Continuation requires the Web Host backend.
 
 ## Results and recovery
 

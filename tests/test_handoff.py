@@ -199,6 +199,33 @@ print(json.dumps({{'type':'final','text':json.dumps({{'status':'blocked','unreso
         self.assertEqual(rpc.call_args_list[0].args[0]["command"], "submit")
         self.assertEqual(rpc.call_args_list[1].args[0]["command"], "wait")
 
+    def test_web_execution_forwards_an_explicit_continuation(self):
+        handoff.update(self.folder, backend="web-host", host_socket="/unused/socket",
+                       model="auto/deepseek-v4.1-flash", effort="low", continue_session="session-previous")
+        receipt = {"session_id": "session-previous", "session_mode": "continue", "created_at": "now"}
+        outcome = {**receipt, "status": "completed", "finished_at": "later", "text": "{}", "report": {"status": "completed"}}
+        with patch.object(handoff, "host_rpc", side_effect=[receipt, outcome]) as rpc:
+            job = handoff.execute(self.folder)
+        self.assertEqual(job["session_mode"], "continue")
+        self.assertEqual(job["dsh_session_id"], "session-previous")
+        self.assertEqual(rpc.call_args_list[0].args[0]["session_id"], "session-previous")
+
+    def test_session_listing_does_not_activate_codex(self):
+        args = ["dsh-handoff", "sessions", "--cwd", str(self.workspace)]
+        with patch.object(sys, "argv", args), patch.object(handoff, "host_rpc", return_value=[]) as rpc, \
+                patch.object(handoff, "Codex") as codex, contextlib.redirect_stdout(io.StringIO()):
+            handoff.main()
+        codex.assert_not_called()
+        self.assertEqual(rpc.call_args.args[0]["command"], "sessions")
+
+    def test_new_and_continue_flags_are_mutually_exclusive(self):
+        args = ["dsh-handoff", "submit", "--plan", "unused", "--cwd", str(self.workspace),
+                "--new-session", "--continue-session", "session-previous"]
+        with patch.object(sys, "argv", args), contextlib.redirect_stderr(io.StringIO()), \
+                self.assertRaises(SystemExit) as error:
+            handoff.main()
+        self.assertEqual(error.exception.code, 2)
+
     def test_web_recovery_reconnects_without_changing_the_prompt(self):
         handoff.update(self.folder, backend="web-host", host_socket="/unused/socket", status="running")
         with patch.object(handoff, "host_rpc", return_value={"status": "running"}), \

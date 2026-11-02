@@ -27,6 +27,11 @@ class InstallTests(unittest.TestCase):
                                     text=True, capture_output=True, check=True)
             self.assertEqual(result.stdout.strip(), '["message with spaces", "$(literal)"]')
             self.assertEqual((skill / "SKILL.md").read_text(), "Skill fixture")
+            endpoint = Path(temp) / "host ' $(no-command).sock"
+            (root / "handoff.py").write_text("import os; print(os.environ['DSH_HANDOFF_HOST_SOCKET'])")
+            installer.install_files(root, Path(temp) / "bin", Path(temp) / "codex", endpoint)
+            result = subprocess.run([str(command)], text=True, capture_output=True, check=True)
+            self.assertEqual(result.stdout.strip(), str(endpoint))
 
     def test_missing_environment_does_not_install_a_broken_command(self):
         with tempfile.TemporaryDirectory() as temp:

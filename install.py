@@ -9,13 +9,14 @@ import subprocess
 import sys
 
 
-def install_files(root, bin_dir, codex_home):
+def install_files(root, bin_dir, codex_home, host_socket=None):
     python = root / ".venv/bin/python"
     if not python.is_file():
         raise RuntimeError("The project virtual environment is absent. Install the dependencies first.")
     bin_dir.mkdir(parents=True, exist_ok=True)
     command = bin_dir / "dsh-handoff"
-    command.write_text("#!/bin/sh\nexec " + shlex.quote(str(python)) + " "
+    endpoint = "" if host_socket is None else "export DSH_HANDOFF_HOST_SOCKET=" + shlex.quote(str(host_socket)) + "\n"
+    command.write_text("#!/bin/sh\n" + endpoint + "exec " + shlex.quote(str(python)) + " "
                        + shlex.quote(str(root / "handoff.py")) + ' "$@"\n')
     command.chmod(0o755)
     skill_dir = codex_home / "skills/dsh-handoff"
@@ -30,6 +31,7 @@ def main():
     parser.add_argument("--codex-home", type=Path,
                         default=Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))))
     parser.add_argument("--skip-deps", action="store_true", help="Use the existing project virtual environment.")
+    parser.add_argument("--host-socket", type=Path, help="Select a side-by-side Web Host plugin socket for this command.")
     args = parser.parse_args()
     if sys.version_info < (3, 10) or os.name != "posix":
         raise SystemExit("Use Python 3.10 or later on Linux or WSL.")
@@ -46,7 +48,8 @@ def main():
             subprocess.run([str(python), "-m", "ensurepip"], check=True)
             subprocess.run([str(python), "-m", "pip", "install", "-r", str(root / "requirements.txt")], check=True)
     subprocess.run([str(python), "-c", "import yaml; from websockets.sync.client import unix_connect"], check=True)
-    command, skill_dir = install_files(root, args.bin_dir.expanduser().resolve(), args.codex_home.expanduser().resolve())
+    command, skill_dir = install_files(root, args.bin_dir.expanduser().resolve(), args.codex_home.expanduser().resolve(),
+                                      args.host_socket.expanduser().resolve() if args.host_socket else None)
     print(f"Command: {command}\nSkill: {skill_dir}\nKeep this checkout at its current path.")
 
 

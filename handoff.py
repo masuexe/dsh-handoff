@@ -148,7 +148,10 @@ def overlay(model, effort):
 
 
 def execution_prompt(folder):
-    return f"""Complete the implementation plan below in the current workspace.
+    continuation = ""
+    if read_job(folder).get("continue_session"):
+        continuation = "This is a follow-up assignment in the existing conversation. Earlier result reports are historical.\nUse relevant prior context, but report only the work and tests for this assignment.\n"
+    return f"""{continuation}Complete the implementation plan below in the current workspace.
 Read the project instructions before you change files.
 Verify assumptions against the source code.
 Implement the required behavior. Run the required tests. Correct failures within the task scope.
@@ -230,8 +233,11 @@ def execute_web(folder):
     request = {"command": "submit", "id": job["id"], "cwd": job["cwd"],
                "model": job["model"], "effort": job["effort"],
                "timeout_seconds": job["timeout_seconds"], "prompt": prompt_file.read_text()}
+    if job.get("continue_session"):
+        request["session_id"] = job["continue_session"]
     receipt = host_rpc(request, job["host_socket"])
     update(folder, status="running", dsh_session_id=receipt["session_id"],
+           session_mode=receipt.get("session_mode", "new"),
            started_at=receipt.get("started_at", receipt["created_at"]))
     outcome = host_rpc({"command": "wait", "id": job["id"]}, job["host_socket"],
                        timeout=job["timeout_seconds"] + 120)
@@ -401,6 +407,9 @@ def submit(args):
     if not plan.strip():
         raise ValueError("The implementation plan is empty.")
     backend = getattr(args, "backend", "web-host")
+    continue_session = getattr(args, "continue_session", None)
+    if continue_session and backend != "web-host":
+        raise ValueError("Session continuation requires the Web Host backend.")
     host_socket = str(getattr(args, "host_socket", HOST_SOCKET))
     dsh_bin = shutil.which("dsh")
     patch = None
@@ -425,6 +434,7 @@ def submit(args):
         "notification": "pending", "created_at": stamp(), "model": args.model,
         "effort": args.effort, "dsh_bin": dsh_bin, "timeout_seconds": args.timeout,
         "backend": backend, "host_socket": host_socket,
+        "continue_session": continue_session,
         "notify_timeout_seconds": 86400, "hold_notification": args.hold_notification})
     pid = launch(folder)
     return {"job_id": job_id, "worker_pid": pid, "directory": str(folder),
@@ -474,11 +484,22 @@ def main():
     start.add_argument("--effort", default="low", choices=["off", "low", "medium", "high", "max"])
     start.add_argument("--backend", choices=["web-host", "headless"], default="web-host")
     start.add_argument("--host-socket", type=Path, default=HOST_SOCKET)
+    session_choice = start.add_mutually_exclusive_group()
+    session_choice.add_argument("--continue-session", help="Continue this idle DSH session in the same workspace.")
+    session_choice.add_argument("--new-session", action="store_true", help="Create a new DSH session explicitly.")
     start.add_argument("--timeout", type=int, default=7200)
     start.add_argument("--hold-notification", action="store_true", help="Run DSH but retain the result without a callback.")
     for name in ["status", "notify", "recover"]:
         commands.add_parser(name).add_argument("job_id")
     commands.add_parser("list")
+    sessions = commands.add_parser("sessions", help="List related DSH session candidates without a model call.")
+    sessions.add_argument("--cwd", required=True, type=Path)
+    sessions.add_argument("--limit", type=int, default=20)
+    sessions.add_argument("--host-socket", type=Path, default=HOST_SOCKET)
+    session_info = commands.add_parser("session-info", help="Read a bounded excerpt from one DSH session.")
+    session_info.add_argument("session_id")
+    session_info.add_argument("--cwd", required=True, type=Path)
+    session_info.add_argument("--host-socket", type=Path, default=HOST_SOCKET)
     commands.add_parser("probe").add_argument("--parent-thread", default=os.environ.get("CODEX_THREAD_ID"))
     internal = commands.add_parser("_worker", help=argparse.SUPPRESS)
     internal.add_argument("job_id")
@@ -495,6 +516,12 @@ def main():
         result["worker_visible_in_this_process_namespace"] = process_alive(result.get("worker_pid"))
     elif args.command == "list":
         result = [read_job(p.parent) for p in sorted((STATE / "jobs").glob("*/job.json"))]
+    elif args.command == "sessions":
+        result = host_rpc({"command": "sessions", "cwd": str(args.cwd.resolve(strict=True)),
+                           "limit": args.limit}, args.host_socket)
+    elif args.command == "session-info":
+        result = host_rpc({"command": "session-info", "session_id": args.session_id,
+                           "cwd": str(args.cwd.resolve(strict=True))}, args.host_socket)
     elif args.command == "probe":
         with Codex() as codex:
             thread = codex.thread(str(uuid.UUID(args.parent_thread)))

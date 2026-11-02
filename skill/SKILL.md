@@ -1,6 +1,6 @@
 ---
 name: dsh-handoff
-description: Delegate an agreed implementation plan to background DSH DeepSeek, end the Codex turn, and receive the result in the original thread. Use when the user requests this asynchronous workflow. Do not use for ordinary direct coding tasks.
+description: Delegate an agreed plan to background DSH DeepSeek. Select a new or relevant existing session, then return the result to the original Codex thread. Use when the user requests this asynchronous workflow. Do not use for ordinary direct coding tasks.
 ---
 
 # DSH handoff
@@ -19,12 +19,14 @@ The task appears as a normal conversation named `Handoff JOB_PREFIX` in that Web
 3. Save an independent implementation plan in a local file.
 4. Include required behavior, scope, constraints, references, and acceptance tests.
 5. Distinguish requirements from implementation suggestions.
-6. Run this command from the parent Codex environment:
+6. Select a new or existing DSH session with the procedure below.
+7. Run this command from the parent Codex environment:
 
 ```bash
 dsh-handoff submit \
   --plan /absolute/path/to/plan.md \
-  --cwd /absolute/path/to/workspace
+  --cwd /absolute/path/to/workspace \
+  --new-session
 ```
 
 The command reads `CODEX_THREAD_ID` for the return address.
@@ -41,6 +43,33 @@ If the Web Host plugin is unavailable, report the connection failure.
 Do not silently switch to headless mode.
 Use `--backend headless` only when the user requests the independent-process mode.
 The Web UI can show a false interruption for an active headless task.
+
+## Select a session
+
+Choose the session yourself unless the user specifies one.
+Do not ask the user to approve routine session selection.
+List candidates in the exact task workspace:
+
+```bash
+dsh-handoff sessions --cwd /absolute/path/to/workspace
+```
+
+Prefer an existing session for a repair, review follow-up, or the next part of the same task.
+Its history must remain relevant to the new assignment.
+Use the returned title, prior job summary, and state to select a candidate.
+If necessary, read a bounded excerpt:
+
+```bash
+dsh-handoff session-info SESSION_ID --cwd /absolute/path/to/workspace
+```
+
+Continue a suitable idle session with `submit --continue-session SESSION_ID` instead of `--new-session`.
+The current continuation interface requires the same provider, model, and reasoning effort.
+Choose a new session for an independent task, an incompatible model selection, or an excessive or unrelated history.
+If no candidate clearly matches, choose a new session.
+State the choice and a short reason with the handoff receipt.
+Do not queue work into a busy session, change its title, or repeat completed work merely to reconstruct context.
+If the user specified an unavailable session, report that failure instead of silently choosing another session.
 
 After a successful submission, report the job ID and end the turn.
 Do not poll, sleep, inspect progress logs, or run parallel implementation work.
