@@ -50,8 +50,8 @@ dsh-handoff submit --plan /absolute/plan.md --cwd /absolute/workspace
 ```
 
 After submission, end the Codex turn.
-The default DSH model is `auto/deepseek-v4.1-flash` with effort `high`.
-Use `--effort low` for a small task.
+The default DSH model is `auto/deepseek-v4.1-flash` with effort `low`.
+Use `--effort high` when the task requires more reasoning.
 The workspace must match the parent Codex thread directory.
 The command reads the parent ID from `CODEX_THREAD_ID`.
 Use `--parent-thread UUID` to specify it explicitly.

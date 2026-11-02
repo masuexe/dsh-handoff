@@ -394,7 +394,7 @@ def main():
     start.add_argument("--cwd", required=True)
     start.add_argument("--parent-thread")
     start.add_argument("--model", default="auto/deepseek-v4.1-flash")
-    start.add_argument("--effort", default="high", choices=["off", "low", "medium", "high", "max"])
+    start.add_argument("--effort", default="low", choices=["off", "low", "medium", "high", "max"])
     start.add_argument("--timeout", type=int, default=7200)
     start.add_argument("--hold-notification", action="store_true", help="Run DSH but retain the result without a callback.")
     for name in ["status", "notify", "recover"]:

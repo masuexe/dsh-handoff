@@ -28,7 +28,7 @@ dsh-handoff submit \
 The command reads `CODEX_THREAD_ID` for the return address.
 Use `--parent-thread UUID` only when that variable is absent or the user specifies another return thread.
 The workspace must match the parent thread directory.
-The default model is `magpie auto/deepseek-v4.1-flash` with effort `high`.
+The default model is `magpie auto/deepseek-v4.1-flash` with effort `low`.
 Preserve an explicit user model or effort with `--model` and `--effort`.
 The default task time limit is two hours. Use `--timeout SECONDS` when the task needs another limit.
 
