@@ -1,0 +1,9 @@
+{
+  "name": "dsh-handoff-host",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "index.js",
+  "description": "Run handoff jobs as normal sessions in the existing DSH Web Host",
+  "files": ["index.js", "cordis.patch.yml"],
+  "dsh": {"bundle": {"patch": "./cordis.patch.yml"}}
+}

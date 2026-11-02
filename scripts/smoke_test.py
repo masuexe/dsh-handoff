@@ -38,6 +38,23 @@ Do not run unrelated checks or contact Codex.
                                                    timeout=180, hold_notification=False))
         evidence.update(submission)
         print(json.dumps(submission), flush=True)
+        job_dir = handoff.job_dir(submission["job_id"])
+        job = handoff.read_job(job_dir)
+        if job.get("backend") == "web-host":
+            for _ in range(30):
+                try:
+                    live = handoff.host_rpc({"command": "inspect", "id": job["id"]}, job["host_socket"])
+                    if live.get("source") == "live" and live.get("agent_status") == "running":
+                        break
+                    time.sleep(0.2)
+                except RuntimeError:
+                    time.sleep(0.2)
+            else:
+                raise RuntimeError("The Web Host did not expose the normal session.")
+            assert live["source"] == "live", live
+            assert live["agent_status"] == "running", live
+            assert live["interrupted"] is False, live
+            evidence["web_session_during_execution"] = live
         deadline = time.monotonic() + 240
         answer = ""
         completed = False
@@ -71,6 +88,22 @@ Do not run unrelated checks or contact Codex.
             time.sleep(0.1)
             job = handoff.read_job(handoff.job_dir(submission["job_id"]))
         assert job["notification"] == "delivered", job
+        if job.get("backend") == "web-host":
+            after = handoff.host_rpc({"command": "inspect", "id": job["id"]}, job["host_socket"])
+            assert after["source"] == "live" and after["agent_status"] == "idle", after
+            assert after["interrupted"] is False, after
+            assert after["default_model"] == evidence["web_session_during_execution"]["default_model"]
+            evidence["web_session_after_execution"] = after
+            headers = []
+            for line in Path(job["dsh_events_path"]).read_text().splitlines():
+                event = json.loads(line)
+                if event.get("type") == "request/header":
+                    headers.append(event["data"]["header"]["config"])
+            assert headers, "No durable model request header was recorded."
+            assert all(header["model"] == "auto/deepseek-v4.1-flash" and header.get("reasoningEffort") == "low"
+                       for header in headers), headers
+            evidence["model_request_headers"] = [{k: h.get(k) for k in ["provider", "model", "reasoningEffort"]}
+                                                  for h in headers]
         evidence.update(result="passed", callback_answer=answer, job=job, finished_at=handoff.stamp())
         observer.rpc("thread/archive", {"threadId": thread_id})
     output = handoff.ROOT / "out/smoke-result.json"

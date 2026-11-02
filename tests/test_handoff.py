@@ -18,6 +18,14 @@ from websockets.sync.server import unix_serve
 
 
 class HandoffTests(unittest.TestCase):
+    def test_terminal_report_accepts_preamble_but_not_incomplete_json(self):
+        self.assertEqual(handoff.parse_report('Verification complete.\n{"status":"completed","tests":[]}')["status"], "completed")
+        self.assertEqual(handoff.parse_report('```json\n{"status":"blocked"}\n```')["status"], "blocked")
+        with self.assertRaises(ValueError):
+            handoff.parse_report('Text\n{"status":"completed"')
+        with self.assertRaises(ValueError):
+            handoff.parse_report('{"status":"completed"} additional prose')
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -177,6 +185,26 @@ print(json.dumps({{'type':'final','text':json.dumps({{'status':'blocked','unreso
         handoff.update(self.folder, status="completed")
         with self.assertRaisesRegex(RuntimeError, "Refuse to repeat"):
             handoff.worker(self.folder)
+
+    def test_web_execution_keeps_the_normal_session_identity(self):
+        handoff.update(self.folder, backend="web-host", host_socket="/unused/socket",
+                       model="auto/deepseek-v4.1-flash", effort="low")
+        receipt = {"session_id": "session-test", "created_at": "now"}
+        outcome = {**receipt, "status": "completed", "finished_at": "later", "text": "{}",
+                   "report": {"status": "completed", "summary": "done"}, "events_path": "/events"}
+        with patch.object(handoff, "host_rpc", side_effect=[receipt, outcome]) as rpc:
+            job = handoff.execute(self.folder)
+        self.assertEqual(job["status"], "completed")
+        self.assertEqual(job["dsh_session_id"], "session-test")
+        self.assertEqual(rpc.call_args_list[0].args[0]["command"], "submit")
+        self.assertEqual(rpc.call_args_list[1].args[0]["command"], "wait")
+
+    def test_web_recovery_reconnects_without_changing_the_prompt(self):
+        handoff.update(self.folder, backend="web-host", host_socket="/unused/socket", status="running")
+        with patch.object(handoff, "host_rpc", return_value={"status": "running"}), \
+                patch.object(handoff, "launch", return_value=123) as launch:
+            handoff.recover(self.folder)
+        launch.assert_called_once_with(self.folder, resume_web=True)
 
 
 if __name__ == "__main__":

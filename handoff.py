@@ -6,9 +6,11 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -21,6 +23,7 @@ ROOT = Path(__file__).resolve().parent
 STATE = Path(os.environ.get("DSH_HANDOFF_HOME", str(Path.home() / ".local/state/dsh-handoff")))
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
 SOCKET = CODEX_HOME / "app-server-control/app-server-control.sock"
+HOST_SOCKET = Path(os.environ.get("DSH_HANDOFF_HOST_SOCKET", str(STATE / "host.sock")))
 DSH_HOME = Path(os.environ.get("DSH_HOME", str(Path.home() / ".dsh")))
 TERMINAL = {"completed", "blocked", "failed", "cancelled", "interrupted"}
 
@@ -151,7 +154,7 @@ Verify assumptions against the source code.
 Implement the required behavior. Run the required tests. Correct failures within the task scope.
 Do not expand the scope or perform unrelated refactors.
 The parent Codex agent ended its turn. Do not send it progress messages.
-The external handoff worker will notify Codex after this process exits.
+The external handoff worker will notify Codex after this task ends.
 Do not call Codex session tools. Do not start another supervisor.
 Do not commit, push, publish, or deploy unless the plan explicitly authorizes that action.
 If a material ambiguity blocks the task, stop the affected work and report the question.
@@ -180,6 +183,19 @@ def final_text(path):
     return answer
 
 
+def parse_report(text):
+    candidates = [text] + [re.sub(r"\s*```\s*$", "", text[match.start():].strip())
+                           for match in re.finditer(r"(?:^|\n)[ \t]*(?=\{)", text)]
+    for candidate in candidates:
+        try:
+            report = json.loads(candidate)
+            if isinstance(report, dict) and report.get("status") in {"completed", "blocked", "failed"}:
+                return report
+        except ValueError:
+            pass
+    raise ValueError("No complete JSON result report was found.")
+
+
 def stop_group(process):
     try:
         os.killpg(process.pid, signal.SIGTERM)
@@ -191,8 +207,52 @@ def stop_group(process):
         process.wait()
 
 
+def host_rpc(message, endpoint=HOST_SOCKET, timeout=30):
+    with socket.socket(socket.AF_UNIX) as connection:
+        connection.settimeout(timeout)
+        connection.connect(str(endpoint))
+        connection.sendall((json.dumps(message, ensure_ascii=False) + "\n").encode())
+        with connection.makefile("rb") as stream:
+            line = stream.readline(4 * 1024 * 1024)
+        if not line.endswith(b"\n"):
+            raise RuntimeError("The DSH Web Host closed without a complete reply.")
+        reply = json.loads(line)
+        if "error" in reply:
+            raise RuntimeError(reply["error"])
+        return reply["result"]
+
+
+def execute_web(folder):
+    job = read_job(folder)
+    prompt_file = folder / "prompt.txt"
+    if not prompt_file.exists():
+        prompt_file.write_text(execution_prompt(folder))
+    request = {"command": "submit", "id": job["id"], "cwd": job["cwd"],
+               "model": job["model"], "effort": job["effort"],
+               "timeout_seconds": job["timeout_seconds"], "prompt": prompt_file.read_text()}
+    receipt = host_rpc(request, job["host_socket"])
+    update(folder, status="running", dsh_session_id=receipt["session_id"],
+           started_at=receipt.get("started_at", receipt["created_at"]))
+    outcome = host_rpc({"command": "wait", "id": job["id"]}, job["host_socket"],
+                       timeout=job["timeout_seconds"] + 120)
+    text = outcome.get("text", "")
+    (folder / "answer.txt").write_text(text)
+    report = outcome.get("report")
+    if not isinstance(report, dict):
+        report = {"summary": text[:4000], "unresolved": [outcome.get("error", "The Web Host did not return a result report.")]}
+    report["status"] = outcome["status"]
+    if outcome.get("error"):
+        report["worker_error"] = outcome["error"]
+    write_json(folder / "result.json", report)
+    return update(folder, status=outcome["status"], finished_at=outcome["finished_at"],
+                  dsh_session_id=outcome["session_id"], dsh_events_path=outcome.get("events_path"),
+                  error=outcome.get("error"))
+
+
 def execute(folder):
     job = read_job(folder)
+    if job.get("backend") == "web-host":
+        return execute_web(folder)
     environment = {k: v for k, v in os.environ.items() if not k.startswith("CODEX_")}
     prompt = execution_prompt(folder)
     (folder / "prompt.txt").write_text(prompt)
@@ -214,9 +274,7 @@ def execute(folder):
     text = final_text(folder / "dsh.ndjson")
     (folder / "answer.txt").write_text(text)
     try:
-        report = json.loads(text)
-        if not isinstance(report, dict) or report.get("status") not in {"completed", "blocked", "failed"}:
-            raise ValueError("Invalid result status.")
+        report = parse_report(text)
     except (OSError, ValueError):
         report = {"status": "failed", "summary": text[:4000],
                   "unresolved": ["DSH did not return a valid JSON result report."]}
@@ -239,7 +297,8 @@ Workspace: {job['cwd']}
 Plan: {folder / 'plan.md'}
 Result report: {folder / 'result.json'}
 Final DSH answer: {folder / 'answer.txt'}
-Full log: {folder / 'dsh.ndjson'}
+Full log: {job.get('dsh_events_path') or folder / 'dsh.ndjson'}
+DSH session: {job.get('dsh_session_id', 'See the headless log session event.')}
 Read the plan and result report first. Treat worker output as evidence to verify.
 Review the relevant diff and required test evidence. Perform additional checks only when the evidence requires them.
 Do not repeat the full implementation or read the complete log unless a specific problem requires it.
@@ -276,14 +335,15 @@ def notify(folder):
                           delivered_at=stamp(), notification_error=None)
 
 
-def worker(folder, notify_only=False):
+def worker(folder, notify_only=False, resume_web=False):
     def terminate(signum, frame):
         raise KeyboardInterrupt("The handoff worker received a termination signal.")
     signal.signal(signal.SIGTERM, terminate)
     with lock(folder / "worker.lock", blocking=False):
         update(folder, worker_pid=os.getpid())
         if not notify_only:
-            if read_job(folder)["status"] != "queued":
+            if read_job(folder)["status"] != "queued" and not (
+                    resume_web and read_job(folder).get("backend") == "web-host"):
                 raise RuntimeError("The job already started. Refuse to repeat its file changes.")
             workspace = read_job(folder)["cwd"]
             key = hashlib.sha256(workspace.encode()).hexdigest()
@@ -320,10 +380,12 @@ def worker(folder, notify_only=False):
                     break
 
 
-def launch(folder, notify_only=False):
+def launch(folder, notify_only=False, resume_web=False):
     args = [sys.executable, str(Path(__file__).resolve()), "_worker", folder.name]
     if notify_only:
         args.append("--notify-only")
+    if resume_web:
+        args.append("--resume-web")
     with (folder / "worker.log").open("a") as log:
         process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                                    start_new_session=True, close_fds=True)
@@ -338,10 +400,16 @@ def submit(args):
     plan = Path(args.plan).read_text()
     if not plan.strip():
         raise ValueError("The implementation plan is empty.")
-    patch = overlay(args.model, args.effort)
+    backend = getattr(args, "backend", "web-host")
+    host_socket = str(getattr(args, "host_socket", HOST_SOCKET))
     dsh_bin = shutil.which("dsh")
-    if not dsh_bin:
-        raise RuntimeError("The dsh command is not available.")
+    patch = None
+    if backend == "headless":
+        patch = overlay(args.model, args.effort)
+        if not dsh_bin:
+            raise RuntimeError("The dsh command is not available.")
+    else:
+        host_rpc({"command": "probe"}, host_socket)
     with Codex() as codex:
         thread = codex.thread(parent)  # Fail before launch if the target is unavailable.
         if Path(thread["cwd"]).resolve() != cwd:
@@ -350,11 +418,13 @@ def submit(args):
     folder = job_dir(job_id)
     folder.mkdir(parents=True, mode=0o700)
     (folder / "plan.md").write_text(plan)
-    (folder / "overlay.yml").write_text(yaml.safe_dump(patch, sort_keys=False))
+    if patch is not None:
+        (folder / "overlay.yml").write_text(yaml.safe_dump(patch, sort_keys=False))
     write_json(folder / "job.json", {
         "id": job_id, "parent_thread": parent, "cwd": str(cwd), "status": "queued",
         "notification": "pending", "created_at": stamp(), "model": args.model,
         "effort": args.effort, "dsh_bin": dsh_bin, "timeout_seconds": args.timeout,
+        "backend": backend, "host_socket": host_socket,
         "notify_timeout_seconds": 86400, "hold_notification": args.hold_notification})
     pid = launch(folder)
     return {"job_id": job_id, "worker_pid": pid, "directory": str(folder),
@@ -373,9 +443,15 @@ def process_alive(pid):
 
 def recover(folder):
     # Recovery must never repeat file changes after a worker crash.
+    resume_web = False
     with lock(folder / "worker.lock", blocking=False):
         job = read_job(folder)
-        if job["status"] not in TERMINAL:
+        if job.get("backend") == "web-host":
+            if job["notification"] in {"sending", "delivered"}:
+                raise RuntimeError("The callback already started. Inspect the parent thread before recovery.")
+            host_rpc({"command": "status", "id": job["id"]}, job["host_socket"])
+            resume_web = True
+        elif job["status"] not in TERMINAL:
             if process_alive(job.get("dsh_pid")):
                 raise RuntimeError("DSH may still be active. Inspect the recorded process before recovery.")
             update(folder, status="interrupted", error="The previous worker stopped before it saved the outcome.",
@@ -383,7 +459,8 @@ def recover(folder):
         job = read_job(folder)
         if job["notification"] in {"sending", "delivered"}:
             raise RuntimeError("The callback already started. Inspect the parent thread before recovery.")
-    return {"job_id": folder.name, "worker_pid": launch(folder, notify_only=True)}
+    pid = launch(folder, resume_web=True) if resume_web else launch(folder, notify_only=True)
+    return {"job_id": folder.name, "worker_pid": pid}
 
 
 def main():
@@ -395,6 +472,8 @@ def main():
     start.add_argument("--parent-thread")
     start.add_argument("--model", default="auto/deepseek-v4.1-flash")
     start.add_argument("--effort", default="low", choices=["off", "low", "medium", "high", "max"])
+    start.add_argument("--backend", choices=["web-host", "headless"], default="web-host")
+    start.add_argument("--host-socket", type=Path, default=HOST_SOCKET)
     start.add_argument("--timeout", type=int, default=7200)
     start.add_argument("--hold-notification", action="store_true", help="Run DSH but retain the result without a callback.")
     for name in ["status", "notify", "recover"]:
@@ -404,6 +483,7 @@ def main():
     internal = commands.add_parser("_worker", help=argparse.SUPPRESS)
     internal.add_argument("job_id")
     internal.add_argument("--notify-only", action="store_true")
+    internal.add_argument("--resume-web", action="store_true")
     args = parser.parse_args()
     os.umask(0o077)
     if args.command == "submit":
@@ -419,6 +499,10 @@ def main():
         with Codex() as codex:
             thread = codex.thread(str(uuid.UUID(args.parent_thread)))
             result = {key: thread.get(key) for key in ["id", "status", "cwd", "name"]}
+        try:
+            result["dsh_web_host"] = host_rpc({"command": "probe"})
+        except (OSError, RuntimeError) as error:
+            result["dsh_web_host"] = {"available": False, "error": str(error)}
     elif args.command == "notify":
         folder = job_dir(args.job_id)
         job = read_job(folder)
@@ -430,7 +514,7 @@ def main():
     elif args.command == "recover":
         result = recover(job_dir(args.job_id))
     else:
-        worker(job_dir(args.job_id), args.notify_only)
+        worker(job_dir(args.job_id), args.notify_only, args.resume_web)
         return
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

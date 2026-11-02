@@ -9,6 +9,8 @@ Use `dsh-handoff` for the background job.
 The default installation places this command in `~/.local/bin`.
 The command uses the existing Codex daemon and the configured Magpie provider.
 It does not require a separate OpenAI API key.
+The default backend submits to the handoff plugin in the existing DSH Web Host.
+The task appears as a normal conversation named `Handoff JOB_PREFIX` in that Web UI.
 
 ## Submit a plan
 
@@ -34,7 +36,11 @@ The default task time limit is two hours. Use `--timeout SECONDS` when the task 
 
 The worker needs network access and access to the local Codex socket.
 If the execution tool restricts these resources, request its normal sandbox escalation for the submit command.
-The worker continues after the shell command exits.
+The worker and Web task continue after the shell command exits.
+If the Web Host plugin is unavailable, report the connection failure.
+Do not silently switch to headless mode.
+Use `--backend headless` only when the user requests the independent-process mode.
+The Web UI can show a false interruption for an active headless task.
 
 After a successful submission, report the job ID and end the turn.
 Do not poll, sleep, inspect progress logs, or run parallel implementation work.
@@ -68,8 +74,9 @@ dsh-handoff recover JOB_UUID
 ```
 
 `notify` retries a callback after a definite failure.
-`recover` reports an interrupted job without repeating its file changes.
+`recover` reconnects to the same Web job without repeating its file changes.
+For a headless job, it reports the interruption without another execution.
 If delivery status is `sending`, its outcome is unknown.
 Inspect the parent thread before any manual replacement notification.
 The tool refuses automatic duplicate delivery in that state.
-The local host and Codex daemon must remain available for automatic delivery.
+The machine, DSH Web Host, and Codex daemon must remain available for automatic delivery.
